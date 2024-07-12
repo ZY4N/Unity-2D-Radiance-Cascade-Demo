@@ -797,7 +797,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 04405154deb1d9a678809a61152b8a99, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  resolutionReduction: 2
+  resolutionReduction: 1
   creationShader: {fileID: 7200000, guid: 6a1c10a410910fb03a3c7db3f8ddaddf, type: 3}
   mergingShader: {fileID: 7200000, guid: f1f57157a7a2bf140825a67eba02bcfc, type: 3}
   finalizationShader: {fileID: 7200000, guid: 0b322ea640605b990b052cd046b42acc, type: 3}
