@@ -73,7 +73,7 @@ public class RayCasterT3D : RayCaster {
 				info.resolution.y > maxTexture3DSize ||
 				info.resolution.z > maxTexture3DSize
 			) {
-				Debug.Log($"Removing layer {layerCount}: the layers resolution ({info.resolution}), axceedds the maximum allowed resolution of {maxTexture3DSize}.");
+				Debug.Log($"Removing layer {layerCount}: the layers resolution ({info.resolution}), exceeds the maximum allowed resolution of {maxTexture3DSize}.");
 				break;
 			}
 			++layerCount;
