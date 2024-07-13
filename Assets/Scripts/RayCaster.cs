@@ -1,260 +1,185 @@
 using System;
 using UnityEngine;
 
-public class RayCaster : MonoBehaviour {
+public abstract class RayCaster : MonoBehaviour {
 
-    private struct RadianceMap {
-        public RenderTexture texture;
-        public Vector3Int threadGroupCount;
-        public Vector2 scale;
-        public float rayOffset;
-        public float stepSize;
-        public int quarterSampleCount;
+	public int renderScale = 2;
+	public float baseRayOffset = 0.5f;
+	public float baseRayLength = 2.0f;
 
-        public RadianceMap(
-            RenderTexture texture,
-            Vector3Int threadGroupCount,
-            Vector2 scale,
-            float rayOffset,
-            float stepSize,
-            int quarterSampleCount
-        ) {
-            this.texture = texture;
-            this.threadGroupCount = threadGroupCount;
-            this.scale = scale;
-            this.rayOffset = rayOffset;
-            this.stepSize = stepSize;
-            this.quarterSampleCount = quarterSampleCount;
-        }
-    };
+	protected static readonly int m_emitterSceneID = Shader.PropertyToID("emitterScene");
+	protected static readonly int m_radianceMapID = Shader.PropertyToID("radianceMap");
+	protected static readonly int m_renderScaleID = Shader.PropertyToID("renderScale");
+	protected static readonly int m_rayOffsetID = Shader.PropertyToID("rayOffset");
+	protected static readonly int m_stepSizeID = Shader.PropertyToID("stepSize");
+	protected static readonly int m_samplesCountID = Shader.PropertyToID("quarterSampleCount");
+	protected static readonly int m_farRadianceMapID = Shader.PropertyToID("farRadianceMap");
+	protected static readonly int m_nearRadianceMapID = Shader.PropertyToID("nearRadianceMap");
 
-    public int resolutionReduction = 2;
+	protected ComputeShader m_creationShader;
+	protected int m_creationKernel;
 
-    public ComputeShader creationShader;
-    public ComputeShader mergingShader;
-    public ComputeShader finalizationShader;
-    public Material compositingMaterial;
+	protected ComputeShader m_mergingShader;
+	protected int m_mergingKernel;
 
-    private Camera m_camera;
-    private Vector2Int m_emitterSceneRes;
-    private Vector2Int m_litSceneRes;
-    private Vector2 m_renderingScale;
-    private Vector3Int m_litSceneThreadGroupCount;
+	protected ComputeShader m_finalizationShader;
+	protected int m_finalizationKernel;
 
-    private RadianceMap[] m_radianceMaps;
-    private RenderTexture m_litScene;
+	protected Vector2Int m_LitSceneRes;
+	protected RenderTexture m_litScene;
+	protected Vector3Int m_finalizationThreadGroupCount;
 
-    private int m_creationKernel;
-    private int m_emitterSceneID;
-    private int m_radianceMapID;
-    private int m_radianceScaleID;
-    private int m_rayOffsetID;
-    private int m_stepSizeID;
-    private int m_samplesCountID;
+	protected struct RadianceLayerInfo {
+		public Vector3Int resolution;
+		public int probeSpacing;
+		public float rayOffset;
+		public float stepSize;
+		public int quarterSampleCount;
 
-    private int m_mergingKernel;
-    private int m_farRadianceMapID;
-    private int m_nearRadianceMapID;
+		public RadianceLayerInfo(
+			Vector3Int resolution,
+			int probeSpacing,
+			float rayOffset,
+			float stepSize,
+			int quarterSampleCount
+		) {
+			this.resolution = resolution;
+			this.probeSpacing = probeSpacing;
+			this.rayOffset = rayOffset;
+			this.stepSize = stepSize;
+			this.quarterSampleCount = quarterSampleCount;
+		}
 
-    private int m_finalizationKernel;
+		public override string ToString() {
+			return $"resolution: {resolution} probeSpacing: {probeSpacing} rayOffset: {rayOffset} stepSize: {stepSize} quarterSampleCount: {quarterSampleCount}";
+		}
+	};
 
-    private int m_litSceneScaleID;
+	private Camera m_camera;
+	
 
-    void Awake() {
-        m_camera = GetComponent<Camera>();
-        SetupRenderTextures();
-        SetupCreationShader();
-        SetupRadianceMaps();
-        SetupMergingShader();
-        SetupFinilizationShader();
-        SetupCompositingMaterial();
-    }
+	protected abstract void InitializeRadianceMaps(RadianceLayerInfo[] layerInfos);
 
+	protected abstract void CreateRadianceCascade();
 
-    void SetupRenderTextures() {
+	protected abstract void MergeRadianceCascade();
 
-        m_emitterSceneRes = new(m_camera.pixelWidth, m_camera.pixelHeight);
-        m_litSceneRes = m_emitterSceneRes / resolutionReduction;
-        m_renderingScale = (Vector2)m_emitterSceneRes / (Vector2)m_litSceneRes;
+	protected abstract void FinalizeRadiance();
 
-        m_litScene = CreateRenderTexture2D(m_litSceneRes.x, m_litSceneRes.y);
-    }
+	protected abstract string shaderPath {
+		get;
+	}
 
-    void SetupRadianceMaps() {
+	private void Start() {
+		m_camera = GetComponent<Camera>();
+		SetupRenderTexture();
+		LoadShaders();
+		SetupRadianceMaps();
+	}
 
-        var diagonalLength = m_litSceneRes.magnitude;
-        var layerCount = (int)Math.Ceiling(Math.Log(diagonalLength, 4)) + 1;
+	private void SetupRenderTexture() {
 
-        Debug.Log($"radiance cascade size: {layerCount}");
+		var emitterSceneRes = new Vector2Int(m_camera.pixelWidth, m_camera.pixelHeight);
+		m_LitSceneRes = emitterSceneRes / renderScale;
 
-        m_radianceMaps = new RadianceMap[layerCount];
+		m_litScene = new RenderTexture(
+			m_LitSceneRes.x, m_LitSceneRes.y,
+			24,
+			RenderTextureFormat.ARGBFloat,
+			RenderTextureReadWrite.Linear
+		);
+		m_litScene.enableRandomWrite = true;
+		m_litScene.Create();
 
-        var linearResolution = m_litSceneRes;
-        var angularResolution = 4;
-        var radianceScale = m_renderingScale;
+	}
 
-        var rayOffset = 0.5f;
-        var rayLength = 1.0f;
+	private void LoadShaders() {
+		var basePath = shaderPath;
 
-        uint kernelGroupsX, kernelGroupsY, kernelGroupsZ;
-        creationShader.GetKernelThreadGroupSizes(
-            m_creationKernel,
-            out kernelGroupsX,
-            out kernelGroupsY,
-            out kernelGroupsZ
-        );
+		m_creationShader = Resources.Load<ComputeShader>(basePath + "creation");
+		m_creationKernel = m_creationShader.FindKernel("CreationKernel");
 
-        for (int i = 0; i != m_radianceMaps.Length; ++i) {
-           
-            var threadGroupCount = new Vector3Int(
-                (linearResolution.x + (int)kernelGroupsX - 1) / (int)kernelGroupsX,
-                (linearResolution.y + (int)kernelGroupsY - 1) / (int)kernelGroupsY,
-                (angularResolution + (int)kernelGroupsZ - 1) / (int)kernelGroupsZ
-            );
+		m_mergingShader = Resources.Load<ComputeShader>(basePath + "merging");
+		m_mergingKernel = m_mergingShader.FindKernel("MergingKernel");
 
-            var quarterSampleCount = Math.Min((int)Math.Ceiling(rayLength / 4), 64);
-            var stepSize = rayLength / (quarterSampleCount * 4);
+		m_finalizationShader = Resources.Load<ComputeShader>(basePath + "finalization");
+		m_finalizationKernel = m_finalizationShader.FindKernel("FinalizationKernel");
 
-            m_radianceMaps[i] = new(
-                CreateRenderTexture3D(linearResolution.x, linearResolution.y, angularResolution),
-                threadGroupCount,
-                radianceScale,
-                rayOffset,
-                stepSize,
-                quarterSampleCount
-            );
+		m_finalizationShader.SetTexture(m_finalizationKernel, "litScene", m_litScene);
+		m_finalizationThreadGroupCount = CalcWorkingGroupSize(
+			m_finalizationShader,
+			m_finalizationKernel,
+			m_litScene.width,
+			m_litScene.height,
+			1
+		);
+	}
 
-            Debug.Log($"Layer {i}: w: {linearResolution.x} h: {linearResolution.y} d: {angularResolution} threadCount: {threadGroupCount} radianceScale: {radianceScale} rayOffset: {rayOffset} rayLength: {rayLength} ");
+	protected Vector3Int CalcWorkingGroupSize(ComputeShader shader, int kernelIndex, int workSizeX, int workSizeY, int workSizeZ) {
 
-            linearResolution = (linearResolution + new Vector2Int(1, 1)) / 2;
-            angularResolution *= 4;
-            radianceScale *= 2;
-            rayOffset += rayLength;
-            rayLength *= 4;
-        }
-    }
-    private RenderTexture CreateRenderTexture2D(int width, int height) {
+		uint threadGroupsX, threadGroupsY, threadGroupsZ;
+		shader.GetKernelThreadGroupSizes(
+			kernelIndex,
+			out threadGroupsX,
+			out threadGroupsY,
+			out threadGroupsZ
+		);
 
-        var rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
+		return new Vector3Int(
+			(workSizeX + (int)threadGroupsX - 1) / (int)threadGroupsX,
+			(workSizeY + (int)threadGroupsY - 1) / (int)threadGroupsY,
+			(workSizeZ + (int)threadGroupsZ - 1) / (int)threadGroupsZ
+		);
+	}
+	
+	void SetupRadianceMaps() {
 
-        rt.enableRandomWrite = true;
-        rt.Create();
+		var diagonalLength = new Vector2Int(m_litScene.width, m_litScene.height).magnitude;
+		var layerCount = (int)Math.Ceiling(Math.Log(diagonalLength, 4)) + 1;
 
-        return rt;
-    }
+		var layerInfos = new RadianceLayerInfo[layerCount];
 
-     private RenderTexture CreateRenderTexture3D(int width, int height, int depth) {
+		var layerInfo = new RadianceLayerInfo(
+			new(m_litScene.width, m_litScene.height, 4),
+			2,
+			baseRayOffset,
+			0.0f,
+			0
+		);
 
-        var rt = new RenderTexture(width, height, 0, RenderTextureFormat.ARGBHalf, RenderTextureReadWrite.Linear);
+		float rayLength = baseRayLength;
 
-        rt.enableRandomWrite = true;
-        rt.dimension = UnityEngine.Rendering.TextureDimension.Tex3D;
-        rt.volumeDepth = depth;
-        rt.Create();
+		for (int i = 0; i != layerCount; ++i) {
 
-        return rt;
-    }
+			layerInfo.quarterSampleCount = Math.Min((int)Math.Ceiling(rayLength / 4), 64);
+			layerInfo.stepSize = rayLength / (layerInfo.quarterSampleCount * 4);
 
-    void SetupCreationShader() {
-        m_creationKernel = creationShader.FindKernel("RadianceMapRayTracer");
+			layerInfos[i] = layerInfo;
 
-        m_emitterSceneID = Shader.PropertyToID("emitterScene");
-        m_radianceMapID = Shader.PropertyToID("radianceMap");
-        m_radianceScaleID = Shader.PropertyToID("radianceScale");
-        m_rayOffsetID = Shader.PropertyToID("rayOffset");
-        m_stepSizeID = Shader.PropertyToID("stepSize");
-        m_samplesCountID = Shader.PropertyToID("quarterSampleCount");
-    }
+			// Debug.Log($"layer[{i}]: {layerInfo}");
 
-    void SetupMergingShader() {
-        m_mergingKernel = mergingShader.FindKernel("RadianceMapMergeKernel");
+			layerInfo.resolution = new(
+				(layerInfo.resolution.x + 1) / 2,
+				(layerInfo.resolution.y + 1) / 2,
+				layerInfo.resolution.z * 4
+			);
+			layerInfo.probeSpacing *= 2;
+			layerInfo.rayOffset += rayLength;
+			
+			rayLength *= 4;
+		}
 
-        m_farRadianceMapID = Shader.PropertyToID("farRadianceMap");
-        m_nearRadianceMapID = Shader.PropertyToID("nearRadianceMap");
-    }
+		InitializeRadianceMaps(layerInfos);
+	}
 
-    void SetupFinilizationShader() {
-        m_finalizationKernel = finalizationShader.FindKernel("RadianceMapFinalizationKernel4x4");
+	private void OnRenderImage(RenderTexture src, RenderTexture dst) {
 
-        uint kernelGroupsX, kernelGroupsY, kernelGroupsZ;
-        finalizationShader.GetKernelThreadGroupSizes(
-            m_creationKernel,
-            out kernelGroupsX,
-            out kernelGroupsY,
-            out kernelGroupsZ
-        );
+		m_creationShader.SetTexture(m_creationKernel, m_emitterSceneID, src);
 
-        m_litSceneThreadGroupCount = new Vector3Int(
-            (m_litSceneRes.x + (int)kernelGroupsX - 1) / (int)kernelGroupsX,
-            (m_litSceneRes.y + (int)kernelGroupsY - 1) / (int)kernelGroupsY,
-            1
-        );
-        
-        finalizationShader.SetTexture(m_finalizationKernel, "radianceMap", m_radianceMaps[0].texture);
-        finalizationShader.SetTexture(m_finalizationKernel, "litScene", m_litScene);
-    }
-
-    void SetupCompositingMaterial() {
-        m_litSceneScaleID = Shader.PropertyToID("_ForegroundScale");
-        compositingMaterial.SetTexture("_ForegroundTex", m_litScene);
-    }
-
-    private void OnRenderImage(RenderTexture src, RenderTexture dst) {
-
-        creationShader.SetTexture(m_creationKernel, m_emitterSceneID, src);
-
-        CreateRadianceCascade();
-        MergeRadianceCascade();
-        FinalizeRadiance();
-
-        /*compositingMaterial.SetVector(m_litSceneScaleID, new Vector4(
-            (float)m_litSceneRes.x / Screen.width,
-            (float)m_litSceneRes.y / Screen.height
-        ));
-
-        Graphics.Blit(src, dst, compositingMaterial); */
-
-        Graphics.Blit(m_litScene, dst);
-    }
-
-    private void CreateRadianceCascade() {
-        for (int i = 0; i != m_radianceMaps.Length; ++i) {
-            ref var radianceMap = ref m_radianceMaps[i];
-            creationShader.SetTexture(m_creationKernel, m_radianceMapID, radianceMap.texture);
-            creationShader.SetVector(m_radianceScaleID, new(radianceMap.scale.x, radianceMap.scale.y, 1.0f, 1.0f));
-            creationShader.SetFloat(m_rayOffsetID, radianceMap.rayOffset);
-            creationShader.SetFloat(m_stepSizeID, radianceMap.stepSize);
-            creationShader.SetFloat(m_samplesCountID, radianceMap.quarterSampleCount);
-            creationShader.Dispatch(
-                m_creationKernel,
-                radianceMap.threadGroupCount.x,
-                radianceMap.threadGroupCount.y,
-                radianceMap.threadGroupCount.z
-            );
-        }
-    }
-
-    private void MergeRadianceCascade() {
-        for (int i = m_radianceMaps.Length - 1; i > 0; --i) {
-            ref var farRadianceMap = ref m_radianceMaps[i];
-            ref var nearRadianceMap = ref m_radianceMaps[i - 1];
-            mergingShader.SetTexture(m_mergingKernel, m_farRadianceMapID, farRadianceMap.texture);
-            mergingShader.SetTexture(m_mergingKernel, m_nearRadianceMapID, nearRadianceMap.texture);
-            mergingShader.Dispatch(
-                m_mergingKernel,
-                nearRadianceMap.threadGroupCount.x,
-                nearRadianceMap.threadGroupCount.y,
-                nearRadianceMap.threadGroupCount.z
-            );
-        }
-    }
-
-    private void FinalizeRadiance() {
-        finalizationShader.Dispatch(
-            m_finalizationKernel, 
-            m_litSceneThreadGroupCount.x,
-            m_litSceneThreadGroupCount.y,
-            m_litSceneThreadGroupCount.z
-        );
-    }
+		CreateRadianceCascade();
+		MergeRadianceCascade();
+		FinalizeRadiance();
+		
+		Graphics.Blit(m_litScene, dst);
+	}
 }

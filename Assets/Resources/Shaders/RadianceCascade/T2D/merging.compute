@@ -1,0 +1,91 @@
+#pragma kernel MergingKernel
+
+#include "Assets/Resources/Shaders/RadianceCascade/common.cginc"
+
+RWTexture2D<float4> farRadianceMap;
+RWTexture2D<float4> nearRadianceMap;
+
+uint farProbeSpacing, nearProbeSpacing;
+uint farAngularRes, nearAngularRes;
+
+struct AngleOffsets {
+	uint2 outerLeft;
+	uint2 innerLeft;
+	uint2 center;
+	uint2 innerRight;
+	uint2 outerRight;
+};
+
+AngleOffsets calcAngleOffsets(uint farAngleIndex);
+uint clampAngleIndex(uint farAngleIndex, int offset);
+uint2 angleIndexToOffset(uint farAngleIndex);
+float4 sampleAngles(uint2 cellIndex, in AngleOffsets angles);
+
+[numthreads(8,8,1)]
+void MergingKernel(uint3 pos : SV_DispatchThreadID) {
+
+	uint2 radianceMapSize = TexSize(nearRadianceMap);
+
+	if (pos.x >= radianceMapSize.x || pos.y >= radianceMapSize.y)
+		return;
+
+	uint2 nearCellIndex = pos.xy / nearProbeSpacing;
+	uint2 nearCellPos = nearCellIndex * nearProbeSpacing;
+	uint2 nearCellOffset = pos.xy - nearCellPos;
+	uint2 nearCellCenter = nearCellPos + (nearProbeSpacing / 2);
+
+	uint nearAngleIndex = nearCellOffset.x + nearCellOffset.y * nearProbeSpacing;
+
+	AngleOffsets farAngles = calcAngleOffsets(4 * nearAngleIndex);
+	
+	int2 centerOffsetNearCell = max(int2(nearCellCenter) - nearProbeSpacing, 0);
+	int2 farCellIndexLL = centerOffsetNearCell / farProbeSpacing;
+
+	uint2 farCellLL = (farCellIndexLL + uint2(0, 0)) * farProbeSpacing;
+	uint2 farCellRL = (farCellIndexLL + uint2(1, 0)) * farProbeSpacing;
+	uint2 farCellLU = (farCellIndexLL + uint2(0, 1)) * farProbeSpacing;
+	uint2 farCellRU = (farCellIndexLL + uint2(1, 1)) * farProbeSpacing;
+
+	float4 farRadiance = BilinearInterpolation(
+		sampleAngles(farCellLU, farAngles),
+		sampleAngles(farCellRU, farAngles),
+		sampleAngles(farCellLL, farAngles),
+		sampleAngles(farCellRL, farAngles),
+		float2(centerOffsetNearCell - farCellLL) / farProbeSpacing
+	);
+
+	float4 nearRadiance = nearRadianceMap[pos.xy];
+
+	MergeRays(nearRadiance, farRadiance);
+
+	nearRadianceMap[pos.xy] = nearRadiance;
+}
+
+AngleOffsets calcAngleOffsets(uint farAngleIndex) {
+	AngleOffsets farAngles;
+	farAngles.outerLeft = angleIndexToOffset(clampAngleIndex(farAngleIndex, farAngularRes - 2));
+	farAngles.innerLeft = angleIndexToOffset(clampAngleIndex(farAngleIndex, farAngularRes - 1));
+	farAngles.center = angleIndexToOffset(farAngleIndex);
+	farAngles.innerRight = angleIndexToOffset(clampAngleIndex(farAngleIndex, 1));
+	farAngles.outerRight = angleIndexToOffset(clampAngleIndex(farAngleIndex, 2));
+	return farAngles;
+}
+
+uint clampAngleIndex(uint farAngleIndex, int offset) {
+	return (farAngleIndex + offset) % farAngularRes;
+}
+
+uint2 angleIndexToOffset(uint farAngleIndex) {
+	uint offsetY = farAngleIndex / farProbeSpacing;
+	return uint2(farAngleIndex - offsetY * farProbeSpacing, offsetY);
+}
+
+float4 sampleAngles(uint2 farCellPos, in AngleOffsets offset) {
+	return 0.25 * float4(
+		farRadianceMap[farCellPos + offset.outerLeft] * 0.5 +
+		farRadianceMap[farCellPos + offset.innerLeft] +
+		farRadianceMap[farCellPos + offset.center] +
+		farRadianceMap[farCellPos + offset.innerRight] +
+		farRadianceMap[farCellPos + offset.outerRight] * 0.5
+	);
+}

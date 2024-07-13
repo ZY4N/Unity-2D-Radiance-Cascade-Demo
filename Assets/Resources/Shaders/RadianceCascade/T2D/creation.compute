@@ -1,0 +1,45 @@
+#pragma kernel CreationKernel
+
+#include "Assets/Resources/Shaders/RadianceCascade/common.cginc"
+
+Texture2D<float4> emitterScene;
+RWTexture2D<float4> radianceMap;
+
+SamplerState emitterLinearClampSampler;
+
+uint renderScale;
+uint probeSpacing, angularRes;
+
+float rayOffset;
+float stepSize;
+uint quarterSampleCount;
+
+[numthreads(8,8,1)]
+void CreationKernel(uint3 pos : SV_DispatchThreadID) {
+
+	uint2 radianceMapSize = TexSize(radianceMap);
+
+	if (pos.x >= radianceMapSize.x || pos.y >= radianceMapSize.y)
+		return;
+
+	float2 emitterSize = TexSize(emitterScene);
+
+	uint2 cellIndex = pos.xy / probeSpacing;
+	uint2 cellPos = cellIndex * probeSpacing;
+	uint2 cellCenter = cellPos + (probeSpacing / 2);
+
+	uint2 cellOffset = pos.xy - cellPos;
+	uint angleIndex = cellOffset.x + cellOffset.y * probeSpacing;
+
+	float2 uvDir = Direction2D((float)angleIndex / angularRes) / emitterSize;
+	float2 uvCenter = (cellCenter * renderScale) / float2(emitterSize); // TODO scaling issue
+	float2 uvOrigin = uvCenter + uvDir * rayOffset;
+
+	radianceMap[pos.xy] = RayTrace(
+		emitterScene,
+		emitterLinearClampSampler,
+		uvOrigin,
+		uvDir * stepSize,
+		quarterSampleCount
+	);
+}

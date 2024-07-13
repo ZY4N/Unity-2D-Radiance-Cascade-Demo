@@ -1,0 +1,32 @@
+#pragma kernel CreationKernel
+
+#include "Assets/Resources/Shaders/RadianceCascade/common.cginc"
+
+Texture2D<float4> emitterScene;
+RWTexture3D<half4> radianceMap;
+
+SamplerState emitterLinearClampSampler;
+
+float renderScale;
+
+float rayOffset;
+float stepSize;
+uint quarterSampleCount;
+
+[numthreads(4,4,4)]
+void CreationKernel(uint3 pos : SV_DispatchThreadID) {
+
+	float3 radianceMapSize = TexSize(radianceMap);
+	float2 emitterSceneSize = TexSize(emitterScene);
+
+	float2 uvDir = Direction2D((float)pos.z / radianceMapSize.z) / emitterSceneSize;
+	float2 uvCenter = ((float2(pos.xy) + 0.5) * renderScale) / emitterSceneSize;
+
+	radianceMap[pos] = RayTrace(
+		emitterScene,
+		emitterLinearClampSampler,
+		uvCenter + uvDir * rayOffset,
+		uvDir * stepSize,
+		quarterSampleCount
+	);
+}

@@ -1,0 +1,28 @@
+#pragma kernel FinalizationKernel
+
+#include "Assets/Resources/Shaders/RadianceCascade/common.cginc"
+
+RWTexture2D<float4> radianceMap;
+RWTexture2D<float4> litScene;
+
+[numthreads(8,8,1)]
+void FinalizationKernel(uint3 pos : SV_DispatchThreadID) {
+
+	uint2 litSceneSize = TexSize(litScene);
+
+	if (pos.x >= litSceneSize.x || pos.y >= litSceneSize.y)
+		return;
+
+	uint2 radainceCellPos = pos.xy * 2;
+
+	float4 avgRadiance = 0.25 * (
+		radianceMap[radainceCellPos + uint2(0, 0)] +
+		radianceMap[radainceCellPos + uint2(0, 1)] +
+		radianceMap[radainceCellPos + uint2(1, 0)] +
+		radianceMap[radainceCellPos + uint2(1, 1)]
+	);
+
+	avgRadiance.w = 1.0 - avgRadiance.w;
+
+	litScene[pos.xy] = avgRadiance;
+}
